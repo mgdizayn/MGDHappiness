@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Arka plan: tam siyah -->
+  <rect width="100" height="100" fill="#000000"/>
+
+  <!-- Sol göz: tıbbi çarpı (+) — pixel art -->
+  <!-- Dikey çubuk -->
+  <rect x="22" y="26" width="8" height="20" fill="white"/>
+  <!-- Yatay çubuk -->
+  <rect x="16" y="32" width="20" height="8" fill="white"/>
+
+  <!-- Sağ göz: tire (-) -->
+  <rect x="56" y="32" width="22" height="8" fill="white"/>
+
+  <!-- Gülümseme: kavisli hat (arc), pixel art yaklaşımı -->
+  <!-- Alt kısmı düz, üst kısmı kavisli — SVG arc ile -->
+  <path d="M 20 65 Q 50 88 80 65" 
+        stroke="white" stroke-width="8" fill="none" 
+        stroke-linecap="round"/>
+</svg>
