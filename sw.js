@@ -1,4 +1,5 @@
-const CACHE = 'mgd-happiness-v1.1';
+// v1.2 — Cache güncellendi, eski oturum sorunu giderildi
+const CACHE = 'mgd-happiness-v1.2';
 const ASSETS = [
   './',
   './index.html',
@@ -15,19 +16,31 @@ self.addEventListener('install', e => {
 });
 
 self.addEventListener('activate', e => {
+  // Eski cache'leri temizle — yeni HTML garantili yüklenir
   e.waitUntil(
     caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
+      Promise.all(keys.filter(k => k !== CACHE).map(k => {
+        console.log('[SW] Eski cache silindi:', k);
+        return caches.delete(k);
+      }))
     ).then(() => self.clients.claim())
   );
 });
 
 self.addEventListener('fetch', e => {
-  // MQTT/API isteklerine dokunma
   if (e.request.url.includes('broker.emqx.io') ||
       e.request.url.includes('fonts.googleapis.com') ||
-      e.request.url.includes('unpkg.com')) return;
+      e.request.url.includes('unpkg.com') ||
+      e.request.url.includes('jsdelivr.net') ||
+      e.request.url.includes('fingerprintjs')) return;
+  // Network-first: önce güncel sürümü almaya çalış, olmazsa cache
   e.respondWith(
-    caches.match(e.request).then(r => r || fetch(e.request))
+    fetch(e.request)
+      .then(r => {
+        const clone = r.clone();
+        caches.open(CACHE).then(c => c.put(e.request, clone));
+        return r;
+      })
+      .catch(() => caches.match(e.request))
   );
 });

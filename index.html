@@ -1032,7 +1032,16 @@ async function cevapSec(val) {
     document.getElementById('btnIleri').disabled = false;
     // Anlık kaydet — sadece oturum_id varsa gönder
     if (S.oturumId) {
-        sendMQTT({tip:'CEVAP_KAYDET', oturum_id:S.oturumId, soru_no:s.soru_no, cevap:val, soru_metni:s.soru_metni}).catch(()=>{});
+        sendMQTT({
+            tip:'CEVAP_KAYDET', oturum_id:S.oturumId,
+            soru_no:s.soru_no, cevap:val, soru_metni:s.soru_metni
+        }).then(r => {
+            // Geçersiz oturum (eski cache/state sorunu) → sayfayı yenile
+            if (r && r.status === 'HATA' && r.mesaj === 'GECERSIZ_OTURUM') {
+                toast('⚠️ Oturum süresi doldu. Sayfa yenileniyor…');
+                setTimeout(() => location.reload(), 2000);
+            }
+        }).catch(() => {});
     }
     setTimeout(() => {
         if (S.soruIdx < S.sorular.length-1) { S.soruIdx++; soruGoster(); }
