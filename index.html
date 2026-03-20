@@ -16,6 +16,8 @@
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/mqtt@5.0.3/dist/mqtt.min.js"></script>
+    <!-- FingerprintJS — cihaz parmak izi (tarayıcı kapansa bile sabit) -->
+    <script src="https://cdn.jsdelivr.net/npm/@fingerprintjs/fingerprintjs@4/dist/fp.min.js"></script>
 
     <style>
         /* ═══════════════════════════════════════════
@@ -326,12 +328,12 @@
 
         .tip-card {
             background: var(--glass); border: 1.5px solid var(--glass-border);
-            border-radius: var(--r); padding: 14px 10px; text-align: center;
+            border-radius: var(--r); padding: 28px 16px; text-align: center;
             cursor: pointer; transition: all 0.22s ease; user-select: none;
         }
         .tip-card:hover { border-color: var(--blue-h); background: var(--blue-dim); transform: translateY(-3px); box-shadow: 0 8px 28px rgba(59,107,255,0.18); }
         .tip-card:active { transform: scale(0.97); }
-        .tip-card .tip-icon { font-size: 30px; margin-bottom: 10px; }
+        .tip-card .tip-icon { font-size: 40px; margin-bottom: 10px; }
         .tip-card .tip-label { font-family: 'Syne', sans-serif; font-size: 15px; font-weight: 700; color: var(--t1); }
         .tip-card .tip-count { font-size: 11px; color: var(--t3); margin-top: 4px; }
 
@@ -734,8 +736,24 @@ const DEV_ID = 'HAP_' + Math.random().toString(36).substr(2,8).toUpperCase();
 
 document.getElementById('device-id').textContent = DEV_ID;
 
+// Cihaz fingerprint — sayfa kapansa bile aynı telefon/tarayıcıda sabit kalır
+let FP_ID = '';
+FingerprintJS.load().then(fp => fp.get()).then(result => {
+    FP_ID = result.visitorId;
+    console.log('[FP] Cihaz ID:', FP_ID.substr(0, 8) + '…');
+}).catch(() => {
+    // FP alınamazsa rastgele ID — localStorage'da sakla (fallback)
+    FP_ID = localStorage.getItem('mgd_fp') || '';
+    if (!FP_ID) {
+        FP_ID = 'fp_' + Math.random().toString(36).substr(2, 16);
+        localStorage.setItem('mgd_fp', FP_ID);
+    }
+});
+
 let mqttClient = null, isConnected = false;
-let currentResp = null, respTimeout = null;
+
+// Her isteğin cevabı kendi req_id'siyle Map'te saklanır → race condition yok
+const pendingRequests = new Map();  // req_id → { resolve, reject, timer }
 
 // ── STATE ───────────────────────────────────────────────────────────────────
 const S = {
@@ -757,7 +775,16 @@ function connectMQTT() {
         mqttClient.on('disconnect', () => { isConnected = false; updateStatus('offline','🔴 Kesildi'); });
         mqttClient.on('error', ()    => { updateStatus('error','🔴 Hata'); });
         mqttClient.on('message', (topic, msg) => {
-            try { currentResp = JSON.parse(msg.toString()); } catch(e){}
+            try {
+                const data = JSON.parse(msg.toString());
+                const rid  = data.req_id;
+                if (rid && pendingRequests.has(rid)) {
+                    const { resolve, timer } = pendingRequests.get(rid);
+                    clearTimeout(timer);
+                    pendingRequests.delete(rid);
+                    resolve(data);
+                }
+            } catch(e) {}
         });
     } catch(e) { updateStatus('error','🔴 Bağlanamadı'); }
 }
@@ -768,22 +795,32 @@ function updateStatus(type, text) {
     el.textContent = text;
 }
 
-// ── MQTT GÖNDER (CleanOS sendMQTT mantığı) ───────────────────────────────────
-function sendMQTT(payload, ms=12000) {
+// ── MQTT GÖNDER — req_id tabanlı, race condition yok ────────────────────────
+function sendMQTT(payload, ms = 12000) {
     return new Promise((resolve, reject) => {
         if (!isConnected) { reject(new Error('Sunucuya bağlı değil')); return; }
-        currentResp = null;
-        if (respTimeout) clearTimeout(respTimeout);
-        respTimeout = setTimeout(() => reject(new Error('Sunucu yanıt vermedi')), ms);
-        const iv = setInterval(() => {
-            if (currentResp) {
-                clearTimeout(respTimeout); clearInterval(iv);
-                const r = currentResp; currentResp = null; resolve(r);
+
+        // Her isteğe benzersiz ID
+        const req_id = Math.random().toString(36).substr(2, 10);
+
+        const timer = setTimeout(() => {
+            pendingRequests.delete(req_id);
+            reject(new Error('Sunucu yanıt vermedi'));
+        }, ms);
+
+        pendingRequests.set(req_id, { resolve, reject, timer });
+
+        mqttClient.publish(
+            TOPIC_ISTEK,
+            JSON.stringify({ ...payload, dev_id: DEV_ID, req_id }),
+            err => {
+                if (err) {
+                    clearTimeout(timer);
+                    pendingRequests.delete(req_id);
+                    reject(new Error('Mesaj gönderilemedi'));
+                }
             }
-        }, 80);
-        mqttClient.publish(TOPIC_ISTEK, JSON.stringify({...payload, dev_id:DEV_ID}), err => {
-            if (err) { clearTimeout(respTimeout); clearInterval(iv); reject(new Error('Gönderilemedi')); }
-        });
+        );
     });
 }
 
@@ -854,9 +891,15 @@ function toast(msg, ok=false) {
 })();
 
 // ── EKRAN 1: TİP SEÇİMİ ─────────────────────────────────────────────────────
+let _tipSecCalisiyor = false;   // double-click koruması
+
 async function tipSec(tip) {
     if (!isConnected) { toast('⚠️ Sunucuya bağlı değil. Lütfen bekleyin.'); return; }
+    if (_tipSecCalisiyor) return;
+    _tipSecCalisiyor = true;
+
     S.anketTipi = tip;
+    S.oturumId  = null;    // önceki oturumu temizle
 
     // Servisleri çek
     try {
@@ -869,21 +912,16 @@ async function tipSec(tip) {
     // Soruları çek
     try {
         const r = await sendMQTT({tip:'SORULAR_AL', anket_tipi:tip});
-        if (r.status!=='OK') { toast('⚠️ Sorular alınamadı.'); return; }
+        if (r.status!=='OK') { toast('⚠️ Sorular alınamadı.'); _tipSecCalisiyor=false; return; }
         S.sorular = r.sorular || [];
-    } catch(e) { toast('⚠️ '+e.message); return; }
+    } catch(e) { toast('⚠️ '+e.message); _tipSecCalisiyor=false; return; }
 
-    // Oturum aç
-    try {
-        const r = await sendMQTT({tip:'OTURUM_BASLAT', anket_tipi:tip});
-        if (r.status!=='OK') { toast('⚠️ Oturum açılamadı.'); return; }
-        S.oturumId = r.oturum_id;
-    } catch(e) { toast('⚠️ '+e.message); return; }
-
+    // Demografik ekranı göster — oturum açma demografiDevam()'da yapılır
     S.cevaplar = {}; S.soruIdx = 0;
     document.getElementById('yatanEkstra').classList.toggle('hidden', tip!=='yatan');
     document.getElementById('acilEkstra').classList.toggle('hidden', tip!=='acil');
     showScreen('screenDemografi','navDemografi');
+    _tipSecCalisiyor = false;
 }
 
 // ── CHİP SEÇİMİ ──────────────────────────────────────────────────────────────
@@ -902,7 +940,12 @@ function chipSec(el, grup) {
 }
 
 // ── EKRAN 2: DEVAM ───────────────────────────────────────────────────────────
-function demografiDevam() {
+let _demografiCalisiyor = false;   // double-click koruması
+
+async function demografiDevam() {
+    if (_demografiCalisiyor) return;
+
+    // Validasyon
     if (!S.cinsiyet) { toast('⚠️ Lütfen cinsiyetinizi seçin.'); return; }
     if (!S.yas)      { toast('⚠️ Lütfen yaş grubunuzu seçin.'); return; }
     S.egitim = document.getElementById('selEgitim').value;
@@ -913,8 +956,34 @@ function demografiDevam() {
         if (!S.katilimci) { toast('⚠️ Lütfen ankete katılanı seçin.'); return; }
     }
     if (S.anketTipi==='acil' && !S.acilBasvuru) { toast('⚠️ Lütfen başvuru şeklini seçin.'); return; }
+
+    _demografiCalisiyor = true;
+
+    // ── OTURUM_BASLAT: soru ekranına geçmeden hemen önce aç ─────────────────
+    // Bu noktada S.oturumId garantili null, sorular cache'de var.
+    try {
+        const r = await sendMQTT({ tip:'OTURUM_BASLAT', anket_tipi:S.anketTipi, cihaz_fp: FP_ID });
+        if (r.status !== 'OK') {
+            if (r.mesaj === 'GUNLUK_LIMIT') {
+                toast('⚠️ Bu cihazdan bugün en fazla 3 anket doldurulabilir. Teşekkürler!');
+            } else {
+                toast('⚠️ Oturum açılamadı: ' + (r.mesaj||''));
+            }
+            _demografiCalisiyor = false;
+            return;
+        }
+        S.oturumId = r.oturum_id;
+        console.log('[Happiness] Oturum açıldı, id:', S.oturumId);
+    } catch(e) {
+        toast('⚠️ Sunucu bağlantısı kesildi: ' + e.message);
+        _demografiCalisiyor = false;
+        return;
+    }
+
+    // oturum_id kesinlikle set, şimdi soruları göster
     soruGoster();
     showScreen('screenSorular','navSorular');
+    _demografiCalisiyor = false;
 }
 function geriGit() { showScreen('screenTip'); }
 
@@ -937,8 +1006,10 @@ async function cevapSec(val) {
     );
     S.cevaplar[s.soru_no] = val;
     document.getElementById('btnIleri').disabled = false;
-    // Anlık kaydet
-    sendMQTT({tip:'CEVAP_KAYDET', oturum_id:S.oturumId, soru_no:s.soru_no, cevap:val, soru_metni:s.soru_metni}).catch(()=>{});
+    // Anlık kaydet — sadece oturum_id varsa gönder
+    if (S.oturumId) {
+        sendMQTT({tip:'CEVAP_KAYDET', oturum_id:S.oturumId, soru_no:s.soru_no, cevap:val, soru_metni:s.soru_metni}).catch(()=>{});
+    }
     setTimeout(() => {
         if (S.soruIdx < S.sorular.length-1) { S.soruIdx++; soruGoster(); }
         else showScreen('screenGorus','navGorus');
@@ -964,6 +1035,13 @@ function soruGeri() {
 
 // ── EKRAN 4: GÖNDER ──────────────────────────────────────────────────────────
 async function ankitiGonder() {
+    // Kritik güvenlik: oturum_id yoksa hiçbir şey yapma
+    if (!S.oturumId) {
+        toast('⚠️ Oturum bilgisi bulunamadı. Lütfen anketi yeniden başlatın.');
+        console.error('[Happiness] ankitiGonder: S.oturumId null!');
+        return;
+    }
+
     const btn = document.getElementById('btnGonder');
     btn.disabled=true; btn.textContent='⏳ Gönderiliyor…';
     try {
@@ -983,10 +1061,15 @@ async function ankitiGonder() {
 function yeniAnket() {
     Object.assign(S, {anketTipi:'',oturumId:null,sorular:[],soruIdx:0,cevaplar:{},
         cinsiyet:'',yas:'',egitim:'',servis:'',yatisSure:'',katilimci:'',acilBasvuru:''});
-    document.getElementById('selEgitim').value='';
-    document.getElementById('selServis').value='';
-    document.getElementById('gorusText').value='';
-    document.querySelectorAll('.chip.selected').forEach(c=>c.classList.remove('selected'));
+    document.getElementById('selEgitim').value = '';
+    document.getElementById('selServis').value = '';
+    document.getElementById('gorusText').value = '';
+    document.querySelectorAll('.chip.selected').forEach(c => c.classList.remove('selected'));
+    // ── DÜZELTİLDİ: Gönder butonu sıfırla ──────────────────────────────────
+    const btn = document.getElementById('btnGonder');
+    btn.disabled    = false;
+    btn.textContent = '✅ Anketi Gönder';
+    // ────────────────────────────────────────────────────────────────────────
     showScreen('screenTip');
 }
 
