@@ -771,13 +771,24 @@ function connectMQTT() {
             isConnected = true;
             updateStatus('online','🟢 Bağlandı');
             mqttClient.subscribe(TOPIC_CEVAP + DEV_ID);
+            // Server broadcast ping kanalını dinle
+            mqttClient.subscribe('MGD/Happiness/ServerPing');
+            _resetServerWatchdog();
         });
         mqttClient.on('disconnect', () => { isConnected = false; updateStatus('offline','🔴 Kesildi'); });
         mqttClient.on('error', ()    => { updateStatus('error','🔴 Hata'); });
         mqttClient.on('message', (topic, msg) => {
             try {
                 const data = JSON.parse(msg.toString());
-                const rid  = data.req_id;
+
+                // Server broadcast ping → bağlantı doğrulandı
+                if (topic === 'MGD/Happiness/ServerPing') {
+                    updateStatus('online', '🟢 Sunucu Aktif');
+                    _resetServerWatchdog();
+                    return;
+                }
+
+                const rid = data.req_id;
                 if (rid && pendingRequests.has(rid)) {
                     const { resolve, timer } = pendingRequests.get(rid);
                     clearTimeout(timer);
@@ -793,6 +804,19 @@ function updateStatus(type, text) {
     const el = document.getElementById('status');
     el.className = 'status ' + type;
     el.textContent = text;
+}
+
+// ── SERVER WATCHDOG — 45 sn server ping gelmezse uyar ───────────────────────
+// Server 30 sn'de bir ping atıyor. 45 sn görünmezse "Sunucu yanıt vermiyor" göster.
+let _serverWatchdog = null;
+
+function _resetServerWatchdog() {
+    if (_serverWatchdog) clearTimeout(_serverWatchdog);
+    _serverWatchdog = setTimeout(() => {
+        if (isConnected) {
+            updateStatus('connecting', '🟡 Sunucu yanıt vermiyor');
+        }
+    }, 45000);  // 45 saniye
 }
 
 // ── MQTT GÖNDER — req_id tabanlı, race condition yok ────────────────────────
@@ -1059,18 +1083,9 @@ async function ankitiGonder() {
 
 // ── YENİ ANKET ────────────────────────────────────────────────────────────────
 function yeniAnket() {
-    Object.assign(S, {anketTipi:'',oturumId:null,sorular:[],soruIdx:0,cevaplar:{},
-        cinsiyet:'',yas:'',egitim:'',servis:'',yatisSure:'',katilimci:'',acilBasvuru:''});
-    document.getElementById('selEgitim').value = '';
-    document.getElementById('selServis').value = '';
-    document.getElementById('gorusText').value = '';
-    document.querySelectorAll('.chip.selected').forEach(c => c.classList.remove('selected'));
-    // ── DÜZELTİLDİ: Gönder butonu sıfırla ──────────────────────────────────
-    const btn = document.getElementById('btnGonder');
-    btn.disabled    = false;
-    btn.textContent = '✅ Anketi Gönder';
-    // ────────────────────────────────────────────────────────────────────────
-    showScreen('screenTip');
+    // Sayfayı yenilemek en güvenli sıfırlama —
+    // tüm state, flag'ler, buton durumları ve MQTT bağlantısı temizlenir.
+    location.reload();
 }
 
 // ── BAŞLAT ────────────────────────────────────────────────────────────────────
